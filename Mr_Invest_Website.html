@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mr Invest: Stock Projections Tool</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for professional look and feel */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        :root {
+            --primary: #1D4ED8; /* Blue-700 */
+            --secondary: #10B981; /* Emerald-500 */
+            --background: #374151; /* Dark Gray */
+            --surface: #ffffff; /* White (for cards/tables) */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--background);
+            color: #f3f4f6; /* Light text color for better contrast on dark background */
+        }
+        .card {
+            background-color: var(--surface);
+            border: 1px solid #e2e8f0; /* Gray-200 */
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        .header-bg {
+            background-color: #111827; /* Gray-900 / Black */
+            color: white;
+        }
+        .sub-header-bg {
+            background-color: #F1F5F9; /* Slate-100 */
+        }
+        .green-box {
+            background-color: #D1FAE5; /* A light green (Emerald-100) */
+            border-radius: 4px;
+            padding: 4px;
+            display: inline-block;
+            width: 100%;
+        }
+        .potential-price-bg {
+            background-color: #FEF9C3; /* Light Yellow (Yellow-100) */
+        }
+        .grey-input {
+            background-color: #F3F4F6; /* Gray-100 */
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            border: 1px solid #E5E7EB; /* Gray-200 */
+        }
+        #peTableBody tr:hover > .potential-price-bg,
+        #psTableBody tr:hover > .potential-price-bg {
+            background-color: #FEF3C7; 
+        }
+        .button {
+            @apply font-semibold py-2 px-4 rounded-lg transition duration-150 ease-in-out shadow-md text-sm md:text-base whitespace-nowrap;
+        }
+        .ai-card {
+            background-color: #F3F4F6; /* Light gray surface */
+            border: 1px solid #D1D5DB; /* Gray-300 */
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+
+    <!-- Firebase Imports and Setup (Mandatory) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, deleteDoc, onSnapshot, collection, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables accessible to the main script
+        window.fb = {
+            db: null,
+            auth: null,
+            userId: null,
+            isAuthReady: false
+        };
+
+        setLogLevel('Debug');
+
+        // Check for required global variables from the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        /**
+         * Initializes Firebase and authenticates the user.
+         */
+        window.setupFirebase = async function() {
+            if (!firebaseConfig) {
+                console.error("Firebase config is missing. Cannot initialize Firestore.");
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                window.fb.db = getFirestore(app);
+                window.fb.auth = getAuth(app);
+
+                onAuthStateChanged(window.fb.auth, async (user) => {
+                    if (user) {
+                        window.fb.userId = user.uid;
+                        window.fb.isAuthReady = true;
+                        console.log("Authenticated user ID:", user.uid);
+                    } else {
+                        // Attempt to sign in if we have a token or anonymously otherwise
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(window.fb.auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(window.fb.auth);
+                        }
+                    }
+                    
+                    // Once authenticated, setup the real-time listener for saved projects
+                    if (window.fb.userId && !window.listenerSetup) {
+                        window.listenerSetup = true; // Prevent re-running listener setup
+                        window.setupDataListener(appId, window.fb.userId, window.fb.db);
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase setup failed:", error);
+            }
+        }
+        
+        /**
+         * Sets up the real-time listener for the user's saved projections.
+         */
+        window.setupDataListener = function(appId, userId, db) {
+            const collectionPath = `artifacts/${appId}/users/${userId}/stock_projections`;
+            const q = query(collection(db, collectionPath));
+            
+            // onSnapshot provides real-time updates
+            onSnapshot(q, (snapshot) => {
+                const loadedProjects = [];
+                snapshot.forEach(doc => {
+                    loadedProjects.push({ id: doc.id, ...doc.data() });
+                });
+                
+                // Update the global state and re-render the saved list
+                window.globalState.savedProjects = loadedProjects;
+                window.renderSavedWork();
+            }, (error) => {
+                console.error("Error setting up Firestore listener:", error);
+            });
+        }
+        
+        /**
+         * Saves the current projection data to Firestore.
+         */
+        window.saveProjection = async function() {
+            if (!window.fb.isAuthReady || !window.fb.db) {
+                window.displayMessage("Please wait for the secure cloud connection to establish.", 'text-red-600');
+                return;
+            }
+            
+            const currentTicker = window.globalState.tickerDisplay;
+            if (!currentTicker || currentTicker === 'TICKER') {
+                window.displayMessage("Please enter a valid Stock Ticker before saving.", 'text-red-600');
+                return;
+            }
+            
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const collectionPath = `artifacts/${appId}/users/${window.fb.userId}/stock_projections`;
+            
+            const projectionData = {
+                ticker: currentTicker,
+                createdAt: serverTimestamp(),
+                globalState: {
+                    priceNow: window.globalState.priceNow,
+                    publicShares: window.globalState.publicShares,
+                    cashBalance: window.globalState.cashBalance,
+                    overridePE: window.globalState.overridePE,
+                    isPEOverridden: window.globalState.isPEOverridden,
+                    currentScaleIsMillions: window.globalState.currentScaleIsMillions // Save current scale preference
+                },
+                // Deep copy of the calculation data (REV, EPS)
+                projectedData: JSON.parse(JSON.stringify(window.initialData.map(d => ({
+                    year: d.year, 
+                    eps: d.eps, 
+                    rev: d.rev 
+                }))))
+            };
+
+            try {
+                await addDoc(collection(window.fb.db, collectionPath), projectionData);
+                window.displayMessage("Model saved successfully!", 'text-green-600');
+            } catch (e) {
+                window.displayMessage("Failed to save model: " + e.message, 'text-red-600');
+                console.error("Error adding document: ", e);
+            }
+        }
+        
+        /**
+         * Deletes a saved projection by ID.
+         */
+        window.deleteProjection = async function(id) {
+            if (!window.fb.isAuthReady || !window.fb.db || !confirm("Are you sure you want to delete this projection?")) {
+                return;
+            }
+            
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const docPath = `artifacts/${appId}/users/${window.fb.userId}/stock_projections/${id}`;
+
+            try {
+                await deleteDoc(doc(window.fb.db, docPath));
+                window.displayMessage("Model deleted.", 'text-yellow-600');
+            } catch (e) {
+                window.displayMessage("Failed to delete model: " + e.message, 'text-red-600');
+                console.error("Error deleting document: ", e);
+            }
+        }
+        
+    </script>
+    
+    <div id="app" class="max-w-7xl mx-auto">
+        <!-- Main Header with Action Buttons -->
+        <header class="bg-gray-900 text-white p-6 rounded-t-xl mb-6 shadow-lg flex flex-col md:flex-row justify-between items-start md:items-center space-y-4 md:space-y-0">
+            <div>
+                <h1 class="text-3xl font-bold">Mr Invest: Stock Projections Tool</h1>
+                <p class="text-gray-300 mt-1">Projection Model based on P/E and P/S multiples.</p>
+            </div>
+            
+            <!-- Action Buttons Group -->
+            <div class="flex flex-wrap space-x-2 md:space-x-4">
+                <!-- Save Button -->
+                <button 
+                    id="save-button"
+                    onclick="saveProjection()"
+                    class="button bg-green-600 hover:bg-green-700 text-white"
+                >
+                    Save to Cloud
+                </button>
+                
+                <!-- Download Button -->
+                <button 
+                    id="download-button"
+                    onclick="downloadCSV()"
+                    class="button bg-yellow-600 hover:bg-yellow-700 text-white"
+                >
+                    Download CSV
+                </button>
+                
+                <!-- Scale Toggle Button -->
+                <button 
+                    id="scale-toggle-button"
+                    onclick="toggleScale()"
+                    class="button bg-blue-600 hover:bg-blue-700 text-white"
+                >
+                    Switch to Billions (B)
+                </button>
+            </div>
+        </header>
+        
+        <!-- Status Message Area (for saves/loads) -->
+        <div id="status-message" class="text-center mb-4 text-lg font-bold"></div>
+
+        <!-- Global Inputs & Info Section -->
+        <section class="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <!-- Ticker Card -->
+            <div class="card p-4 rounded-lg flex flex-col justify-between">
+                <label for="tickerDisplay" class="text-sm text-gray-500">Stock Ticker</label>
+                <input 
+                    type="text" 
+                    id="tickerDisplay" 
+                    value="EOSE" 
+                    class="text-3xl font-extrabold text-gray-800 border-none focus:ring-blue-500 focus:border-blue-500 w-full grey-input uppercase" 
+                    onchange="this.value = this.value.toUpperCase(); updateGlobalState('tickerDisplay', this.value);"
+                >
+                <div class="text-xs text-gray-400 mt-1">Model based on provided data.</div>
+            </div>
+
+            <!-- Current Price Card -->
+            <div class="card p-4 rounded-lg flex flex-col justify-between">
+                <label for="priceNow" class="text-sm text-gray-500">Current Price ($)</label>
+                <input 
+                    type="number" 
+                    id="priceNow" 
+                    value="15.00" 
+                    class="text-3xl font-extrabold text-green-700 border-none focus:ring-blue-500 focus:border-blue-500 w-full grey-input" 
+                    step="0.01" 
+                    onchange="updateGlobalState('priceNow', this.value)"
+                >
+                <div class="text-xs text-gray-400 mt-1">As of today's date.</div>
+            </div>
+
+            <!-- Public Shares Input -->
+            <div class="card p-4 rounded-lg flex flex-col justify-between">
+                <label id="publicSharesLabel" for="publicShares" class="text-sm text-gray-500">Public Shares (M)</label>
+                <input 
+                    type="number" 
+                    id="publicShares" 
+                    value="100.00" 
+                    class="text-3xl font-extrabold text-gray-800 border-none focus:ring-blue-500 focus:border-blue-500 w-full grey-input" 
+                    onchange="updateGlobalState('publicShares', this.value)"
+                >
+                <div class="text-xs text-gray-400 mt-1">Crucial for P/S calculation.</div>
+            </div>
+
+            <!-- Balance Sheet Cash Input -->
+            <div class="card p-4 rounded-lg flex flex-col justify-between">
+                <label id="cashBalanceLabel" for="cashBalance" class="text-sm text-gray-500">Balance Sheet Cash (M)</label>
+                <input 
+                    type="number" 
+                    id="cashBalance" 
+                    value="162.00" 
+                    class="text-3xl font-extrabold text-green-700 border-none focus:ring-blue-500 focus:border-blue-500 w-full grey-input" 
+                    step="0.01" 
+                    min="0"
+                    onchange="updateGlobalState('cashBalance', this.value)"
+                >
+                <div class="text-xs text-gray-400 mt-1">Cash balance for Net Cash calculation.</div>
+            </div>
+        </section>
+        
+        <!-- Valuation Tables - Stacked vertically -->
+        <div class="flex flex-col gap-6">
+
+            <!-- P/E Valuation Table -->
+            <div class="card p-6 rounded-xl overflow-x-auto">
+                <h2 class="text-2xl font-bold text-gray-900 mb-4">Earnings Multiples (P/E) Valuation</h2>
+                <p class="text-sm text-gray-500 mb-4">Potential Price = Projected EPS × P/E Multiple</p>
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="sub-header-bg">
+                        <tr>
+                            <th class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">Year</th>
+                            <th id="revHeaderM" class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">Proj. REV (M)</th> 
+                            <th class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">REV Gr. (%)</th>
+                            <th class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">Proj. EPS ($)</th>
+                            <th class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">EPS Gr. (%)</th>
+                            <th class="px-3 py-3 text-center text-xs font-bold text-gray-900 uppercase tracking-wider" colspan="3" id="pe-multiple-header">Potential Price ($) at P/E Multiples (Dynamic/Manual Scenarios)</th>
+                        </tr>
+                        <tr class="text-xs font-bold bg-gray-50 text-gray-900" id="pe-multiple-labels">
+                            <th class="px-3 py-2"></th>
+                            <th class="px-3 py-2"></th> 
+                            <th class="px-3 py-2"></th>
+                            <th class="px-3 py-2"></th> 
+                            <th class="px-3 py-2"></th> 
+                            <th class="px-3 py-2 text-center text-gray-900">
+                                <input type="number" id="bearPEInput" value="50" class="w-16 p-1 rounded-md text-sm text-center bg-white border border-gray-300 focus:ring-blue-500 focus:border-blue-500" onchange="updatePEMultiples()" onfocus="this.select()">x (Bear)
+                            </th> 
+                            <th class="px-3 py-2 text-center text-gray-900">
+                                <input type="number" id="basePEInput" value="60" class="w-16 p-1 rounded-md text-sm text-center bg-white border border-gray-300 focus:ring-blue-500 focus:border-blue-500" onchange="updatePEMultiples()" onfocus="this.select()">x (Base)
+                            </th>
+                            <th class="px-3 py-2 text-center text-gray-900">
+                                <input type="number" id="bullPEInput" value="70" class="w-16 p-1 rounded-md text-sm text-center bg-white border border-gray-300 focus:ring-blue-500 focus:border-blue-500" onchange="updatePEMultiples()" onfocus="this.select()">x (Bull)
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody id="peTableBody" class="divide-y divide-gray-100">
+                        <!-- Data rows will be injected here -->
+                    </tbody>
+                    <tfoot id="peTableFoot" class="bg-gray-100 font-bold border-t-2 border-gray-300">
+                        <!-- Footer row will be injected here -->
+                    </tfoot>
+                </table>
+            </div>
+
+            <!-- P/S Valuation Table -->
+            <div class="card p-6 rounded-xl overflow-x-auto">
+                <h2 class="text-2xl font-bold text-gray-900 mb-4">Sales Multiples (P/S) Valuation</h2>
+                <p class="text-sm text-gray-500 mb-4">Potential Price = (Projected REV × P/S Multiple) / Shares</p>
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="sub-header-bg">
+                        <tr>
+                            <th class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">Year</th>
+                            <th class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">Proj. REV (<span id="revHeaderM_mirror">M</span>)</th>
+                            <th class="px-3 py-3 text-left text-xs font-bold text-gray-900 uppercase tracking-wider">REV Gr. (%)</th>
+                            <th class="px-3 py-3 text-center text-xs font-bold text-gray-900 uppercase tracking-wider" colspan="3">Potential Price ($) at P/S Multiples (Fixed Scenarios)</th>
+                        </tr>
+                        <tr class="text-xs font-bold bg-gray-50 text-gray-900" id="ps-multiple-labels">
+                            <th class="px-3 py-2"></th>
+                            <th class="px-3 py-2"></th>
+                            <th class="px-3 py-2"></th>
+                            <th class="px-3 py-2 text-center text-gray-900">2x (Bear)</th>
+                            <th class="px-3 py-2 text-center text-gray-900">5x (Base)</th>
+                            <th class="px-3 py-2 text-center text-gray-900">8x (Bull)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="psTableBody" class="divide-y divide-gray-100">
+                        <!-- Data rows will be injected here -->
+                    </tbody>
+                    <tfoot id="psTableFoot" class="bg-gray-100 font-bold border-t-2 border-gray-300">
+                        <!-- Footer row will be injected here -->
+                    </tfoot>
+                </table>
+            </div>
+        </div>
+        
+        <!-- AI Projection Assistant Section -->
+        <section class="mt-10 mb-8 p-6 ai-card rounded-xl shadow-xl">
+            <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M1.636 17.364l.707-.707M14.293 11.414L18 15.121M17.364 7.636l-1.414 1.414M12 10.5V17m-4.664-8.5a.5.5 0 01.12.55L8.5 13h7l1.044-3.55a.5.5 0 01.11-.55m-8.5-4.5h8a1 1 0 011 1v10a1 1 0 01-1 1h-8a1 1 0 01-1-1v-10a1 1 0 011-1z" />
+                </svg>
+                ✨ AI Projection Assistant (Gemini)
+            </h2>
+            <p class="text-sm text-gray-600 mb-4">Enter a stock ticker to automatically fetch real-time metrics and model projected Rev/EPS up to 2028. This uses Gemini with **Google Search grounding**.</p>
+            <div class="flex flex-col sm:flex-row gap-4 mb-4">
+                <input 
+                    type="text" 
+                    id="aiTickerInput" 
+                    placeholder="Enter Stock Ticker (e.g., GOOG, AAPL)"
+                    class="flex-grow p-3 rounded-lg border border-gray-300 text-gray-800 uppercase"
+                    onkeypress="if(event.key === 'Enter') generateProjections()"
+                >
+                <button 
+                    id="generateButton"
+                    onclick="generateProjections()"
+                    class="button bg-blue-600 hover:bg-blue-700 text-white w-full sm:w-auto"
+                >
+                    Generate Projections
+                </button>
+            </div>
+            
+            <!-- Loading and Results Area -->
+            <div id="aiResultArea" class="mt-6 min-h-[50px]">
+                <!-- Results and loading indicator will be displayed here -->
+            </div>
+        </section>
+        
+        <!-- AI Risk and Summary Analysis Section -->
+        <section class="mt-10 mb-8 p-6 ai-card rounded-xl shadow-xl">
+            <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                ✨ Risk & Summary Analysis
+            </h2>
+            <p class="text-sm text-gray-600 mb-4">Click below to send your current model's projected growth and price targets to Gemini for a quick risk assessment and investment summary.</p>
+            
+            <button 
+                id="analyzeButton"
+                onclick="analyzeValuationModel()"
+                class="button bg-red-600 hover:bg-red-700 text-white w-full sm:w-auto"
+            >
+                Analyze Current Model
+            </button>
+            
+            <div id="analysisResultArea" class="mt-6 min-h-[50px] bg-white p-4 rounded-lg shadow-inner hidden">
+                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b pb-3 mb-3">
+                    <h3 class="text-xl font-bold text-gray-900">Investment Thesis Summary</h3>
+                    <p id="riskRating" class="text-2xl font-extrabold text-red-600"></p>
+                </div>
+                <p id="summaryText" class="text-gray-700 leading-relaxed"></p>
+            </div>
+        </section>
+
+
+        <!-- Saved Work Section -->
+        <section class="mt-10">
+            <h2 class="text-2xl font-bold text-white mb-4">Your Saved Valuation Models</h2>
+            <div id="saved-work-list" class="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                <!-- Saved items will be injected here -->
+                <p class="text-gray-300 col-span-full" id="loading-message">Loading saved models...</p>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        // Global state to manage the application data
+        window.globalState = {
+            tickerDisplay: 'EOSE',
+            priceNow: 15.00, // Always dollars/share
+            publicShares: 100.00, // Always Millions
+            cashBalance: 162.00, // Always Millions
+            currentScaleIsMillions: true,
+            isPEOverridden: false,
+            overridePE: [50, 60, 70], 
+            savedProjects: [] // Array to hold loaded Firestore documents
+        };
+        
+        window.initialData = [
+            { year: 2025, eps: 0.10, rev: 150.0, epsGrowth: null, revGrowth: null },
+            { year: 2026, eps: 0.30, rev: 470.0, epsGrowth: 200, revGrowth: 213.33 },
+            { year: 2027, eps: 0.85, rev: 1000.0, epsGrowth: 183.33, revGrowth: 112.77 },
+            { year: 2028, eps: 1.50, rev: 1300.0, epsGrowth: 76.47, revGrowth: 30.00 }
+        ];
+        
+        const PS_MULTIPLES = [2, 5, 8]; // Bear, Base, Bull
+        
+        let messageTimeout;
+        const apiKey = ""; // API key is provided by the canvas environment for gemini-2.5-flash-preview-09-2025
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+        /** Displays a temporary message in the status area. */
+        window.displayMessage = function(text, colorClass) {
+            const statusEl = document.getElementById('status-message');
+            statusEl.textContent = text;
+            statusEl.className = `text-center mb-4 text-lg font-bold ${colorClass}`;
+            clearTimeout(messageTimeout);
+            messageTimeout = setTimeout(() => {
+                statusEl.textContent = '';
+                statusEl.className = 'text-center mb-4 text-lg font-bold';
+            }, 5000);
+        }
+
+        /**
+         * Loads a saved project's data into the current application state.
+         */
+        window.loadProjection = function(project) {
+            // 1. Update globalState
+            Object.keys(project.globalState).forEach(key => {
+                window.globalState[key] = project.globalState[key];
+            });
+            window.globalState.tickerDisplay = project.ticker;
+            
+            // 2. Update initialData (ensure array lengths match, though they should)
+            project.projectedData.forEach((d, index) => {
+                if (window.initialData[index]) {
+                    window.initialData[index].eps = d.eps;
+                    window.initialData[index].rev = d.rev;
+                }
+            });
+
+            // 3. Force the current scale based on saved state, then re-render
+            window.renderAll();
+            window.displayMessage(`Model for ${project.ticker} loaded successfully!`, 'text-blue-600');
+        }
+
+        /**
+         * Renders the list of saved projects at the bottom of the page.
+         */
+        window.renderSavedWork = function() {
+            const listEl = document.getElementById('saved-work-list');
+            listEl.innerHTML = '';
+            
+            if (window.globalState.savedProjects.length === 0) {
+                listEl.innerHTML = '<p class="text-gray-300 col-span-full">No models saved yet. Click "Save to Cloud" to begin!</p>';
+                return;
+            }
+
+            window.globalState.savedProjects.forEach(project => {
+                const date = project.createdAt ? new Date(project.createdAt.seconds * 1000).toLocaleDateString() : 'N/A';
+                const itemHtml = `
+                    <div class="card p-4 rounded-lg flex flex-col justify-between hover:shadow-xl transition duration-150 border-t-4 border-blue-500">
+                        <h3 class="text-xl font-bold text-gray-900 mb-2 truncate">${project.ticker}</h3>
+                        <p class="text-xs text-gray-500 mb-3">Saved: ${date}</p>
+                        <div class="flex justify-between space-x-2">
+                            <button 
+                                onclick="loadProjection(${JSON.stringify(project).replace(/"/g, '&quot;')})" 
+                                class="flex-grow button bg-blue-500 hover:bg-blue-600 text-white text-sm py-1 px-2"
+                            >
+                                Load
+                            </button>
+                            <button 
+                                onclick="deleteProjection('${project.id}')" 
+                                class="button bg-red-500 hover:bg-red-600 text-white text-sm py-1 px-2 w-1/4"
+                            >
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                `;
+                listEl.innerHTML += itemHtml;
+            });
+        }
+        
+        /**
+         * Downloads the current projection as a CSV file.
+         */
+        window.downloadCSV = function() {
+            const currentPE = globalState.overridePE;
+            const headers = [
+                "Year", 
+                `Proj. REV (${getUnitSuffix()})`, 
+                "REV Gr. (%)", 
+                "Proj. EPS ($)", 
+                "EPS Gr. (%)", 
+                `PE_${currentPE[0]}x_Bear_Price`, 
+                `PE_${currentPE[1]}x_Base_Price`, 
+                `PE_${currentPE[2]}x_Bull_Price`, 
+                `PS_2x_Bear_Price`, 
+                `PS_5x_Base_Price`, 
+                `PS_8x_Bull_Price`
+            ];
+            
+            let csv = headers.join(',') + '\n';
+            const scaleFactor = getScaleFactor();
+            const publicShares = globalState.publicShares;
+
+            // Data rows
+            initialData.forEach(data => {
+                const revScaled = (data.rev * scaleFactor).toFixed(2);
+                const revGrowth = data.revGrowth !== null ? formatPercentage(data.revGrowth).replace('%', '') : '';
+                const epsGrowth = data.epsGrowth !== null ? formatPercentage(data.epsGrowth).replace('%', '') : '';
+                
+                const pePrices = currentPE.map(pe => calculatePE(data.eps, pe).toFixed(2));
+                const psPrices = PS_MULTIPLES.map(ps => calculatePS(data.rev, ps, publicShares).toFixed(2));
+                
+                const row = [
+                    data.year, 
+                    revScaled, 
+                    revGrowth, 
+                    data.eps.toFixed(2), 
+                    epsGrowth,
+                    ...pePrices,
+                    ...psPrices
+                ];
+                csv += row.join(',') + '\n';
+            });
+
+            // Footer row
+            calculateGrowth();
+            const lastDataPoint = initialData[initialData.length - 1];
+            const { avgRevGrowth, peRoiPercentages, psRoiPercentages } = calculateAveragesAndROI(
+                globalState.priceNow, publicShares, lastDataPoint, currentPE, PS_MULTIPLES
+            );
+            
+            const roiRow = [
+                "ROI / Avg Gr.", 
+                `Current Price: $${globalState.priceNow.toFixed(2)}`,
+                avgRevGrowth !== null ? formatPercentage(avgRevGrowth).replace('%', '') : '',
+                "Shares (M)",
+                globalState.publicShares.toFixed(2),
+                ...peRoiPercentages.map(roi => formatPercentage(roi).replace('%', '')),
+                ...psRoiPercentages.map(roi => formatPercentage(roi).replace('%', ''))
+            ];
+            csv += roiRow.join(',') + '\n';
+
+            // Create and trigger download
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.setAttribute('download', `${globalState.tickerDisplay}_Valuation_${new Date().toISOString().slice(0, 10)}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            displayMessage(`Model downloaded as ${globalState.tickerDisplay}.csv`, 'text-yellow-600');
+        }
+
+        // --- Existing Helper Functions (Unchanged Logic, added to window scope) ---
+
+        window.getUnitSuffix = () => globalState.currentScaleIsMillions ? 'M' : 'B';
+        window.getScaleFactor = () => globalState.currentScaleIsMillions ? 1 : 0.001;
+
+        window.toggleScale = function() {
+            globalState.currentScaleIsMillions = !globalState.currentScaleIsMillions;
+            renderAll();
+        }
+
+        window.updatePEMultiples = function() {
+            const bearVal = parseFloat(document.getElementById('bearPEInput').value);
+            const baseVal = parseFloat(document.getElementById('basePEInput').value);
+            const bullVal = parseFloat(document.getElementById('bullPEInput').value);
+
+            if (!isNaN(bearVal) && !isNaN(baseVal) && !isNaN(bullVal)) {
+                globalState.overridePE = [bearVal, baseVal, bullVal];
+                globalState.isPEOverridden = true;
+            }
+            calculateValuations(); 
+        }
+
+        window.updateGlobalState = function(elementId, value) {
+            let internalValue = parseFloat(value);
+            
+            if (elementId === 'tickerDisplay') {
+                globalState.tickerDisplay = value.toUpperCase();
+            } else if (elementId === 'priceNow') {
+                globalState.priceNow = internalValue;
+            } else if (elementId === 'publicShares' || elementId === 'cashBalance') {
+                if (!globalState.currentScaleIsMillions) {
+                    internalValue *= 1000;
+                }
+                if (elementId === 'publicShares') {
+                    globalState.publicShares = internalValue;
+                } else {
+                    globalState.cashBalance = internalValue;
+                }
+            }
+            renderAll();
+        }
+
+        window.updateTableData = function(index, key, value) {
+            let internalValue = parseFloat(value);
+            
+            if (key === 'rev') {
+                if (!globalState.currentScaleIsMillions) {
+                    internalValue *= 1000;
+                }
+                initialData[index][key] = internalValue;
+                globalState.isPEOverridden = false; 
+            } else if (key === 'eps') {
+                initialData[index][key] = internalValue;
+            }
+            
+            renderAll();
+        }
+        
+        window.formatCurrency = (num) => isNaN(num) || num === null ? '-' : '$' + num.toFixed(2);
+        window.formatPercentage = (num) => isNaN(num) || num === null ? '-' : (Math.round(num * 100) / 100).toFixed(2) + '%';
+        window.calculatePE = (eps, pe) => eps * pe;
+        window.calculatePS = (rev, ps, shares) => (rev * ps) / shares;
+
+        window.calculateGrowth = function() {
+            for (let i = 1; i < initialData.length; i++) {
+                const current = initialData[i];
+                const previous = initialData[i - 1];
+
+                if (previous.rev > 0) {
+                    current.revGrowth = ((current.rev - previous.rev) / previous.rev) * 100;
+                } else {
+                    current.revGrowth = null;
+                }
+
+                if (previous.eps !== null && previous.eps !== 0) {
+                    current.epsGrowth = ((current.eps - previous.eps) / previous.eps) * 100;
+                } else {
+                    current.epsGrowth = null;
+                }
+            }
+        }
+
+        window.calculateAveragesAndROI = function(priceNow, publicShares, lastDataPoint, peMultiples, psMultiples) {
+            const allRevGrowth = initialData.slice(1).map(d => d.revGrowth).filter(g => g !== null && !isNaN(g));
+            const avgRevGrowth = allRevGrowth.length > 0 ? allRevGrowth.reduce((sum, g) => sum + g, 0) / allRevGrowth.length : null;
+
+            const peRoiPercentages = peMultiples.map(pe => {
+                const projectedPrice2028 = calculatePE(lastDataPoint.eps, pe);
+                return ((projectedPrice2028 - priceNow) / priceNow) * 100;
+            });
+
+            const psRoiPercentages = psMultiples.map(ps => {
+                const projectedPrice2028 = calculatePS(lastDataPoint.rev, ps, publicShares);
+                return ((projectedPrice2028 - priceNow) / priceNow) * 100;
+            });
+
+            return { avgRevGrowth, peRoiPercentages, psRoiPercentages };
+        }
+
+        window.generateFooterRowHTML = function(isPE, avgRevGrowth, roiPercentages) {
+            let html = `<tr class="bg-gray-50 hover:bg-gray-100">`;
+
+            if (isPE) {
+                html += `
+                    <td class="px-3 py-2 text-left text-xs font-medium text-gray-700 uppercase"><span class="font-bold text-base text-gray-900">Averages / ROI</span></td>
+                    <td class="px-3 py-2 text-sm font-bold text-left" colspan="2">
+                        <span class="green-box inline-block text-green-700 text-center">${avgRevGrowth !== null ? formatPercentage(avgRevGrowth) : '-'}</span>
+                    </td>
+                    <td class="px-3 py-2" colspan="2"></td>
+                    ${roiPercentages.map(roi => `<td class="px-3 py-2 whitespace-nowrap text-center text-sm font-extrabold"><span class="green-box inline-block text-green-700 text-center">${formatPercentage(roi)}</span></td>`).join('')}
+                `;
+            } else {
+                html += `
+                    <td class="px-3 py-2 text-left text-xs font-medium text-gray-700 uppercase"><span class="font-bold text-base text-gray-900">Averages / ROI</span></td>
+                    <td class="px-3 py-2 text-sm font-bold text-left" colspan="2">
+                        <span class="green-box inline-block text-green-700 text-center">${avgRevGrowth !== null ? formatPercentage(avgRevGrowth) : '-'}</span>
+                    </td>
+                    ${roiPercentages.map(roi => `<td class="px-3 py-2 whitespace-nowrap text-center text-sm font-extrabold"><span class="green-box inline-block text-green-700 text-center">${formatPercentage(roi)}</span></td>`).join('')}
+                `;
+            }
+
+            html += `</tr>`;
+            return html;
+        }
+
+        window.renderAll = function() {
+            const suffix = getUnitSuffix();
+            const scaleFactor = getScaleFactor();
+
+            // A. Update UI elements
+            document.getElementById('scale-toggle-button').textContent = globalState.currentScaleIsMillions ? 'Switch to Billions (B)' : 'Switch to Millions (M)';
+            document.getElementById('publicSharesLabel').textContent = `Public Shares (${suffix})`;
+            document.getElementById('cashBalanceLabel').textContent = `Balance Sheet Cash (${suffix})`;
+            document.getElementById('revHeaderM').textContent = `Proj. REV (${suffix})`;
+            document.getElementById('revHeaderM_mirror').textContent = suffix;
+
+            // B. Update Global Input Values
+            document.getElementById('tickerDisplay').value = globalState.tickerDisplay;
+            document.getElementById('priceNow').value = globalState.priceNow.toFixed(2); 
+            document.getElementById('publicShares').value = (globalState.publicShares * scaleFactor).toFixed(2);
+            document.getElementById('cashBalance').value = (globalState.cashBalance * scaleFactor).toFixed(2);
+
+            // C. Recalculate and Re-render Tables
+            calculateValuations();
+        }
+
+
+        window.calculateValuations = function() {
+            calculateGrowth();
+
+            const priceNow = globalState.priceNow;
+            const publicShares = globalState.publicShares;
+            
+            const peTableBody = document.getElementById('peTableBody');
+            const psTableBody = document.getElementById('psTableBody');
+            const peTableFoot = document.getElementById('peTableFoot');
+            const psTableFoot = document.getElementById('psTableFoot');
+            
+            const scaleFactor = getScaleFactor();
+
+            peTableBody.innerHTML = '';
+            psTableBody.innerHTML = '';
+
+            const isValidShares = !isNaN(publicShares) && publicShares > 0;
+            const isValidPrice = !isNaN(priceNow) && priceNow > 0;
+
+            if (!isValidShares || !isValidPrice) {
+                const errorMessage = "Please enter valid Current Price and Public Shares inputs.";
+                peTableBody.innerHTML = `<tr><td colspan="8" class="p-4 text-center text-red-500">${errorMessage}</td></tr>`;
+                psTableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-red-500">${errorMessage}</td></tr>`;
+                peTableFoot.innerHTML = '';
+                psTableFoot.innerHTML = '';
+                return;
+            }
+
+            const psMultiples = PS_MULTIPLES;
+            
+            const lastDataPoint = initialData[initialData.length - 1];
+            let peMultiples = [20, 30, 40]; // Default fallback
+            
+            if (lastDataPoint && lastDataPoint.revGrowth !== null && !isNaN(lastDataPoint.revGrowth)) {
+                const revGrowth = lastDataPoint.revGrowth;
+                
+                let basePE = 2 * revGrowth;
+                
+                // MANDATORY LOGIC: Round Base PE to the nearest 10
+                basePE = Math.round(basePE / 10) * 10;
+                
+                const bearPE = basePE - 10;
+                const bullPE = basePE + 10;
+                
+                const dynamicPE = [bearPE, basePE, bullPE];
+
+                if (globalState.isPEOverridden) {
+                    peMultiples = globalState.overridePE;
+                } else {
+                    peMultiples = dynamicPE;
+                    globalState.overridePE = dynamicPE;
+                }
+            } else {
+                globalState.isPEOverridden = false;
+                peMultiples = [20, 30, 40];
+                globalState.overridePE = peMultiples;
+            }
+
+            // Update P/E Header Input Values to show the currently active multiples
+            document.getElementById('bearPEInput').value = peMultiples[0].toFixed(0);
+            document.getElementById('basePEInput').value = peMultiples[1].toFixed(0);
+            document.getElementById('bullPEInput').value = peMultiples[2].toFixed(0);
+            
+            const { avgRevGrowth, peRoiPercentages, psRoiPercentages } = calculateAveragesAndROI(
+                priceNow, 
+                publicShares, 
+                lastDataPoint, 
+                peMultiples, 
+                psMultiples
+            );
+
+            initialData.forEach( (data, index) => {
+                const year = data.year;
+                
+                // P/E Row
+                const pePrices = peMultiples.map(pe => calculatePE(data.eps, pe));
+                const peRow = document.createElement('tr');
+                peRow.className = 'hover:bg-gray-50';
+                peRow.innerHTML = `
+                    <td class="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900">${year}</td>
+                    <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-800">
+                        <input type="number" id="rev-${year}" value="${(data.rev * scaleFactor).toFixed(2)}" step="0.01" class="w-20 p-1 rounded-md text-sm text-gray-800 bg-gray-100 border border-gray-200 focus:ring-blue-500 focus:border-blue-500" data-key="rev" data-index="${index}" onchange="updateTableData(${index}, 'rev', this.value)">
+                    </td>
+                    <td class="px-3 py-2 whitespace-nowrap text-sm text-green-700 font-semibold">${data.revGrowth !== null ? formatPercentage(data.revGrowth) : '-'}</td>
+                    <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-800">
+                        <input type="number" id="eps-${year}" value="${data.eps.toFixed(2)}" step="0.01" class="w-20 p-1 rounded-md text-sm text-gray-800 bg-gray-100 border border-gray-200 focus:ring-blue-500 focus:border-blue-500" data-key="eps" data-index="${index}" onchange="updateTableData(${index}, 'eps', this.value)">
+                    </td>
+                    <td class="px-3 py-2 whitespace-nowrap text-sm font-semibold text-green-700">${data.epsGrowth !== null ? formatPercentage(data.epsGrowth) : '-'}</td>
+                    ${pePrices.map(price => `<td class="px-3 py-2 whitespace-nowrap text-center text-base font-extrabold potential-price-bg text-gray-900">${formatCurrency(price)}</td>`).join('')}
+                `;
+                peTableBody.appendChild(peRow);
+
+                // P/S Row
+                const psPrices = psMultiples.map(ps => calculatePS(data.rev, ps, publicShares));
+                const psRow = document.createElement('tr');
+                psRow.className = 'hover:bg-gray-50';
+                psRow.innerHTML = `
+                    <td class="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900">${year}</td>
+                    <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-800">${(data.rev * scaleFactor).toFixed(2)}</td>
+                    <td class="px-3 py-2 whitespace-nowrap text-sm text-green-700 font-semibold">${data.revGrowth !== null ? formatPercentage(data.revGrowth) : '-'}</td>
+                    ${psPrices.map(price => `<td class="px-3 py-2 whitespace-nowrap text-center text-base font-extrabold potential-price-bg text-gray-900">${formatCurrency(price)}</td>`).join('')}
+                `;
+                psTableBody.appendChild(psRow);
+            });
+
+            // Footer Rows
+            peTableFoot.innerHTML = generateFooterRowHTML(true, avgRevGrowth, peRoiPercentages);
+            psTableFoot.innerHTML = generateFooterRowHTML(false, avgRevGrowth, psRoiPercentages);
+        }
+
+        /**
+         * Converts the structured data into the plain text prompt for the analysis model.
+         */
+        window.getAnalysisPrompt = function() {
+            const lastData = initialData[initialData.length - 1];
+            
+            const currentPE = globalState.overridePE;
+            const currentPS = PS_MULTIPLES;
+
+            // Generate Price Targets for the last year (2028)
+            const peTargets = currentPE.map(pe => ({
+                multiple: pe,
+                price: calculatePE(lastData.eps, pe),
+                roi: calculateROI(calculatePE(lastData.eps, pe))
+            }));
+            const psTargets = currentPS.map(ps => ({
+                multiple: ps,
+                price: calculatePS(lastData.rev, ps, globalState.publicShares),
+                roi: calculateROI(calculatePS(lastData.rev, ps, globalState.publicShares))
+            }));
+
+            // Structure the output
+            let prompt = `Analyze the investment case for the stock ${globalState.tickerDisplay}.\n\n`;
+            prompt += `**Current Snapshot:**\n`;
+            prompt += `* Current Price: $${globalState.priceNow.toFixed(2)}\n`;
+            prompt += `* Current Public Shares (Millions): ${globalState.publicShares.toFixed(2)}\n`;
+            prompt += `* Balance Sheet Cash (Millions): ${globalState.cashBalance.toFixed(2)}\n\n`;
+            
+            prompt += `**Projected Performance (2028 Target Year):**\n`;
+            prompt += `* Projected 2028 Revenue (Millions): ${lastData.rev.toFixed(2)}\n`;
+            prompt += `* Projected 2028 EPS: $${lastData.eps.toFixed(2)}\n`;
+            prompt += `* Average Projected Revenue Growth Rate (Annualized): ${calculateAveragesAndROI(globalState.priceNow, globalState.publicShares, lastData, currentPE, currentPS).avgRevGrowth.toFixed(2)}%\n\n`;
+            
+            prompt += `**2028 Price Targets (P/E Basis):**\n`;
+            peTargets.forEach(t => {
+                prompt += `* P/E ${t.multiple}x (Scenario): Price $${t.price.toFixed(2)} (ROI: ${t.roi.toFixed(2)}%)\n`;
+            });
+            
+            prompt += `\n**2028 Price Targets (P/S Basis):**\n`;
+            psTargets.forEach(t => {
+                prompt += `* P/S ${t.multiple}x (Scenario): Price $${t.price.toFixed(2)} (ROI: ${t.roi.toFixed(2)}%)\n`;
+            });
+
+            prompt += `\nBased on these growth projections and price targets, provide:\n`;
+            prompt += `1. A single-paragraph Investment Thesis Summary.\n`;
+            prompt += `2. A Risk Rating (Low, Moderate, High) based on the required growth to justify the current price and the potential upside.\n`;
+            prompt += `Format the output strictly as a JSON object with keys "summary" (string) and "risk_rating" (string).\n`;
+
+            return prompt;
+        }
+
+        window.calculateROI = (projectedPrice) => {
+            const priceNow = globalState.priceNow;
+            return ((projectedPrice - priceNow) / priceNow) * 100;
+        }
+
+        /**
+         * Generates the analysis summary using Gemini.
+         */
+        window.analyzeValuationModel = async function() {
+            if (!globalState.priceNow || globalState.priceNow <= 0 || !globalState.publicShares || globalState.publicShares <= 0) {
+                displayMessage("Please ensure Current Price and Public Shares are valid before analysis.", 'text-red-600');
+                return;
+            }
+
+            const analyzeButton = document.getElementById('analyzeButton');
+            const resultArea = document.getElementById('analysisResultArea');
+            const summaryTextEl = document.getElementById('summaryText');
+            const riskRatingEl = document.getElementById('riskRating');
+
+            analyzeButton.disabled = true;
+            analyzeButton.textContent = 'Analyzing...';
+            resultArea.innerHTML = '<div class="text-center py-4"><svg class="animate-spin h-6 w-6 text-red-600 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg></div>';
+            resultArea.classList.remove('hidden');
+            
+            const userPrompt = getAnalysisPrompt();
+            
+            const payload = {
+                contents: [{ parts: [{ text: userPrompt }] }],
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            "summary": { "type": "STRING", "description": "The investment thesis summary." },
+                            "risk_rating": { "type": "STRING", "description": "The risk rating (e.g., Low, Moderate, High)." }
+                        },
+                        "propertyOrdering": ["summary", "risk_rating"]
+                    }
+                }
+            };
+            
+            try {
+                let response;
+                let finalResult;
+                const maxRetries = 3;
+                
+                // Exponential backoff for API call
+                for (let attempt = 0; attempt < maxRetries; attempt++) {
+                    const delay = Math.pow(2, attempt) * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay)); 
+
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        finalResult = await response.json();
+                        break;
+                    } else if (response.status === 401) {
+                         throw new Error("Authorization Failed (401). This typically indicates a missing or invalid API Key.");
+                    } else if (attempt === maxRetries - 1) {
+                        throw new Error(`API error: ${response.status} ${response.statusText}`);
+                    }
+                }
+
+                const jsonString = finalResult?.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!jsonString) throw new Error("Received empty or malformed response from AI.");
+
+                const analysis = JSON.parse(jsonString);
+
+                summaryTextEl.innerHTML = analysis.summary.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+                riskRatingEl.textContent = analysis.risk_rating;
+
+                const colorMap = {
+                    'LOW': 'text-green-600',
+                    'MODERATE': 'text-yellow-600',
+                    'HIGH': 'text-red-600'
+                };
+                riskRatingEl.className = `text-2xl font-extrabold ${colorMap[analysis.risk_rating.toUpperCase()] || 'text-gray-600'}`;
+
+            } catch (error) {
+                console.error("AI Analysis Error:", error);
+                
+                let errorMessage = `Failed to get analysis. ${error.message}`;
+                
+                if (error.message.includes("401")) {
+                     errorMessage = "Authorization Failed (401). Please ensure your API key is correctly configured for the Gemini API call.";
+                }
+
+                resultArea.innerHTML = `<div class="p-4 text-red-700 bg-red-100 rounded-lg text-sm">${errorMessage}</div>`;
+                riskRatingEl.textContent = 'ERROR';
+                riskRatingEl.className = 'text-2xl font-extrabold text-red-600';
+
+            } finally {
+                analyzeButton.disabled = false;
+                analyzeButton.textContent = 'Analyze Current Model';
+            }
+        }
+
+
+        // --- Projection Generation with Gemini API ---
+
+        /**
+         * Generates the prompt for the AI to fetch and project financial data.
+         */
+        window.getProjectionPrompt = function(ticker) {
+            return `Find the current stock price, outstanding shares (public float), and balance sheet cash (or cash equivalents) for the ticker ${ticker}. Then, use this real-time data and long-term financial forecasts from reputable sources to project the Revenue (REV) and Earnings Per Share (EPS) for the years 2025, 2026, 2027, and 2028.
+            
+            **Output Format:** Provide the results as a single JSON object.
+            
+            {
+              "ticker": "TICKER",
+              "priceNow": CURRENT_PRICE_FLOAT,
+              "publicSharesMillions": SHARES_MILLIONS_FLOAT,
+              "cashBalanceMillions": CASH_MILLIONS_FLOAT,
+              "projections": [
+                {"year": 2025, "eps": EPS_2025_FLOAT, "revMillions": REV_2025_FLOAT},
+                {"year": 2026, "eps": EPS_2026_FLOAT, "revMillions": REV_2026_FLOAT},
+                {"year": 2027, "eps": EPS_2027_FLOAT, "revMillions": REV_2027_FLOAT},
+                {"year": 2028, "eps": EPS_2028_FLOAT, "revMillions": REV_2028_FLOAT}
+              ]
+            }`;
+        }
+
+        /**
+         * Fetches real-time data and financial projections from the Gemini API using search grounding.
+         */
+        window.generateProjections = async function() {
+            const ticker = document.getElementById('aiTickerInput').value.toUpperCase().trim();
+            if (!ticker) {
+                displayMessage("Please enter a stock ticker.", 'text-red-600');
+                return;
+            }
+
+            const generateButton = document.getElementById('generateButton');
+            const resultArea = document.getElementById('aiResultArea');
+            generateButton.disabled = true;
+            generateButton.textContent = 'Searching...';
+            resultArea.innerHTML = '<div class="text-center py-4 text-gray-700"><svg class="animate-spin h-6 w-6 text-blue-600 mx-auto mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>Fetching data and generating model...</div>';
+
+            const userPrompt = getProjectionPrompt(ticker);
+            const payload = {
+                contents: [{ parts: [{ text: userPrompt }] }],
+                tools: [{ "google_search": {} }],
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            "ticker": { "type": "STRING" },
+                            "priceNow": { "type": "NUMBER" },
+                            "publicSharesMillions": { "type": "NUMBER" },
+                            "cashBalanceMillions": { "type": "NUMBER" },
+                            "projections": {
+                                "type": "ARRAY",
+                                "items": {
+                                    "type": "OBJECT",
+                                    "properties": {
+                                        "year": { "type": "INTEGER" },
+                                        "eps": { "type": "NUMBER" },
+                                        "revMillions": { "type": "NUMBER" }
+                                    },
+                                    "propertyOrdering": ["year", "eps", "revMillions"]
+                                }
+                            }
+                        },
+                        "propertyOrdering": ["ticker", "priceNow", "publicSharesMillions", "cashBalanceMillions", "projections"]
+                    }
+                }
+            };
+
+            try {
+                let response;
+                let finalResult;
+                const maxRetries = 3;
+
+                // Exponential backoff for API call
+                for (let attempt = 0; attempt < maxRetries; attempt++) {
+                    const delay = Math.pow(2, attempt) * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay)); 
+
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        finalResult = await response.json();
+                        break;
+                    } else if (response.status === 401) {
+                         throw new Error("Authorization Failed (401). This typically indicates a missing or invalid API Key.");
+                    } else if (attempt === maxRetries - 1) {
+                        throw new Error(`API error: ${response.status} ${response.statusText}`);
+                    }
+                }
+                
+                const jsonString = finalResult?.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!jsonString) throw new Error("Received empty or malformed response from AI.");
+
+                const data = JSON.parse(jsonString);
+
+                // 1. Update Global State
+                globalState.tickerDisplay = data.ticker.toUpperCase();
+                globalState.priceNow = parseFloat(data.priceNow);
+                globalState.publicShares = parseFloat(data.publicSharesMillions); // Store in millions
+                globalState.cashBalance = parseFloat(data.cashBalanceMillions); // Store in millions
+                
+                // Set scale to Millions (M) as the API returns in Millions
+                globalState.currentScaleIsMillions = true; 
+                
+                // 2. Update Projection Data
+                window.initialData = data.projections.map(p => ({
+                    year: p.year,
+                    eps: parseFloat(p.eps),
+                    rev: parseFloat(p.revMillions), // Already in millions
+                    epsGrowth: null,
+                    revGrowth: null
+                }));
+
+                // 3. Render
+                renderAll();
+                
+                // 4. Extract Sources
+                let sourcesHtml = '';
+                const groundingMetadata = finalResult.candidates?.[0]?.groundingMetadata;
+                if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                    const sources = groundingMetadata.groundingAttributions
+                        .map(attr => attr.web)
+                        .filter(web => web && web.uri && web.title);
+
+                    if (sources.length > 0) {
+                        sourcesHtml = `<div class="mt-4 p-3 bg-white rounded-lg border border-gray-200">
+                            <p class="font-semibold text-xs text-gray-700 mb-2">Sources (from Google Search Grounding):</p>
+                            <ul class="list-disc list-inside text-xs text-gray-600 space-y-1">
+                                ${sources.map(s => `<li><a href="${s.uri}" target="_blank" class="text-blue-500 hover:underline">${s.title}</a></li>`).join('')}
+                            </ul>
+                        </div>`;
+                    }
+                }
+
+                resultArea.innerHTML = `<div class="p-4 bg-green-100 border border-green-400 text-green-700 rounded-lg text-sm font-semibold">Projections loaded successfully for ${data.ticker}!</div>${sourcesHtml}`;
+                document.getElementById('aiTickerInput').value = data.ticker;
+
+
+            } catch (error) {
+                console.error("Gemini Projection Error:", error);
+                
+                let errorMessage = `Failed to fetch or parse projections. ${error.message}`;
+                
+                if (error.message.includes("401")) {
+                     errorMessage = "Authorization Failed (401). Please ensure your API key is correctly configured for the Gemini API call.";
+                }
+                
+                resultArea.innerHTML = `<div class="p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg text-sm">${errorMessage}</div>`;
+            } finally {
+                generateButton.disabled = false;
+                generateButton.textContent = 'Generate Projections';
+            }
+        }
+
+
+        // --- Initialization ---
+        
+        // Call this function to start the Firebase setup
+        window.onload = function() {
+            setupFirebase();
+            renderAll(); // Initial render
+        };
+    </script>
+</body>
+</html>
